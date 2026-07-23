@@ -38,6 +38,7 @@
     timer: null,
     observer: null,
     actual: null,
+    equipoReal: [],
     firmaRerollBloqueada: ""
   };
 
@@ -398,7 +399,7 @@
         <div class="stats">
           <div class="stat">
             <b data-u="ovr">?</b>
-            <small>overall</small>
+            <small>ovr bot</small>
           </div>
 
           <div class="stat">
@@ -546,51 +547,164 @@
     )).length;
   }
 
-  function overall() {
-    const number = Number(
-      document
-        .querySelector(".box-head > .num")
-        ?.textContent
-        ?.trim()
-    );
+  /*
+ * Overall mostrado oficialmente por 7a0.
+ *
+ * En modo Clásico normalmente devuelve un número.
+ * En modo De memoria devuelve null porque la página muestra "?".
+ */
+function overallJuego() {
+  const raw =
+    document
+      .querySelector(".box-head > .num")
+      ?.textContent
+      ?.trim() || "";
 
-    return Number.isFinite(number)
-      ? number
-      : null;
+  if (
+    !raw ||
+    raw === "?"
+  ) {
+    return null;
   }
 
-  function team() {
-    return [
-      ...document.querySelectorAll(".boxscore tbody tr")
-    ]
-      .map(row => {
-        const player =
-          row.children[1]?.textContent?.trim() || "";
+  const number = Number(raw);
 
-        const force = Number(
-          row.children[2]?.textContent?.trim()
+  return Number.isFinite(number)
+    ? number
+    : null;
+}
+
+/*
+ * Lee el equipo del box score.
+ *
+ * Cuando la fuerza está oculta, utiliza el valor que
+ * guardamos al colocar al jugador.
+ */
+function team() {
+  return [
+    ...document.querySelectorAll(".boxscore tbody tr")
+  ]
+    .map((row, index) => {
+      const position =
+        row.children[0]?.textContent?.trim() || "";
+
+      const player =
+        row.children[1]?.textContent?.trim() || "";
+
+      const forceText =
+        row.children[2]?.textContent?.trim() || "";
+
+      const visibleForce =
+        forceText &&
+        forceText !== "?"
+          ? Number(forceText)
+          : NaN;
+
+      /*
+       * Primero relacionamos por fila.
+       * Esto permite incluso tener dos versiones
+       * distintas de un jugador con el mismo nombre.
+       */
+      const savedByRow =
+        S.equipoReal.find(saved =>
+          saved.fila === index
         );
 
-        return {
-          posición:
-            row.children[0]?.textContent?.trim() || "",
+      /*
+       * Respaldo por nombre cuando no pudimos
+       * identificar la fila al colocarlo.
+       */
+      const sameName =
+        S.equipoReal.filter(saved =>
+          normName(saved.nombre) ===
+          normName(player)
+        );
 
-          jugador: player,
+      const savedByName =
+        sameName.length === 1
+          ? sameName[0]
+          : null;
 
-          fuerza:
-            Number.isFinite(force)
-              ? force
-              : null,
+      const saved =
+        savedByRow ||
+        savedByName;
 
-          empty:
-            row.classList.contains("empty") ||
-            !player ||
-            player === "—"
-        };
-      })
-      .filter(player => !player.empty)
-      .map(({ empty, ...player }) => player);
+      const force =
+        Number.isFinite(visibleForce)
+          ? visibleForce
+          : Number.isFinite(saved?.fuerza)
+            ? saved.fuerza
+            : null;
+
+      return {
+        posición: position,
+        jugador: player,
+        fuerza: force,
+
+        empty:
+          row.classList.contains("empty") ||
+          !player ||
+          player === "—"
+      };
+    })
+    .filter(player => !player.empty)
+    .map(({ empty, ...player }) => player);
+}
+
+/*
+ * Calcula el promedio de fuerza de todos
+ * los jugadores que ya están colocados.
+ *
+ * Solo devuelve un resultado cuando conocemos
+ * la fuerza de absolutamente todos.
+ */
+function overallCalculado() {
+  const currentTeam = team();
+
+  if (!currentTeam.length) {
+    return null;
   }
+
+  const forces = currentTeam
+    .map(player => player.fuerza)
+    .filter(Number.isFinite);
+
+  /*
+   * Evita mostrar una media engañosa si falta
+   * conocer la fuerza de algún jugador.
+   */
+  if (forces.length !== currentTeam.length) {
+    return null;
+  }
+
+  const total = forces.reduce(
+    (sum, force) => sum + force,
+    0
+  );
+
+  const average =
+    total / forces.length;
+
+  /*
+   * Una cifra decimal:
+   * 86.3636... → 86.4
+   */
+  return Number(
+    average.toFixed(1)
+  );
+}
+
+/*
+ * El panel prioriza nuestro cálculo.
+ * Si todavía no podemos calcularlo, utiliza
+ * el overall oficial visible del juego.
+ */
+function overall() {
+  return (
+    overallCalculado() ??
+    overallJuego()
+  );
+}
 
   function slots() {
     return [
@@ -1815,6 +1929,25 @@
     const previousCount =
       count();
 
+/*
+ * Guardamos qué filas estaban vacías antes del clic.
+ * Después podremos detectar exactamente cuál recibió
+ * al nuevo jugador.
+ */
+const filasVaciasAntes = new Set(
+  [
+    ...document.querySelectorAll(
+      ".boxscore tbody tr"
+    )
+  ]
+    .map((row, index) =>
+      row.classList.contains("empty")
+        ? index
+        : -1
+    )
+    .filter(index => index >= 0)
+);
+
     phase(
       "Eligiendo el mejor puesto",
 
@@ -1885,13 +2018,114 @@
         count() > previousCount
       );
 
-    if (!placedCorrectly) {
-      throw new Error(
-        `No se pudo colocar a ${player.name}`
-      );
-    }
+   if (!placedCorrectly) {
+  throw new Error(
+    `No se pudo colocar a ${player.name}`
+  );
+}
 
-    await sleep(C.pausaColocar);
+/*
+ * Localizamos la fila que acaba de llenarse.
+ */
+const rowsAfter = [
+  ...document.querySelectorAll(
+    ".boxscore tbody tr"
+  )
+];
+
+const newRowIndex =
+  rowsAfter.findIndex(
+    (row, index) =>
+      filasVaciasAntes.has(index) &&
+      !row.classList.contains("empty")
+  );
+
+/*
+ * La fuerza puede venir del jugador seleccionado
+ * o del objeto completo guardado en S.actual.
+ */
+const realForce =
+  Number.isFinite(player.force)
+    ? player.force
+    : Number.isFinite(S.actual?.force)
+      ? S.actual.force
+      : null;
+
+if (Number.isFinite(realForce)) {
+  const record = {
+    fila: newRowIndex,
+    nombre: player.name,
+    fuerza: realForce,
+    posicion: chosen.pos,
+
+    selección:
+      drawInfo().nation || "",
+
+    mundial:
+      drawInfo().year || null
+  };
+
+  /*
+   * Si por alguna razón ya existía información para
+   * esa fila, la actualizamos. En caso contrario,
+   * añadimos un nuevo jugador.
+   */
+  const existingIndex =
+    newRowIndex >= 0
+      ? S.equipoReal.findIndex(
+          saved =>
+            saved.fila === newRowIndex
+        )
+      : -1;
+
+  if (existingIndex >= 0) {
+    S.equipoReal[existingIndex] =
+      record;
+  } else {
+    S.equipoReal.push(record);
+  }
+
+  console.log(
+    "%c📊 OVERALL ACTUALIZADO",
+    [
+      "background:#0369a1",
+      "color:#fff",
+      "font-weight:bold",
+      "padding:5px 9px",
+      "border-radius:5px"
+    ].join(";")
+  );
+
+  console.log(
+    `${player.name}: ${realForce}`
+  );
+
+  console.log(
+    "Fuerza acumulada:",
+    S.equipoReal.reduce(
+      (sum, saved) =>
+        sum + saved.fuerza,
+      0
+    )
+  );
+
+  console.log(
+    "Overall actual:",
+    overallCalculado() ?? "calculando…"
+  );
+
+  console.table(
+    S.equipoReal.map(saved => ({
+      posición: saved.posicion,
+      jugador: saved.nombre,
+      fuerza: saved.fuerza,
+      selección: saved.selección,
+      mundial: saved.mundial
+    }))
+  );
+}
+
+await sleep(C.pausaColocar);
 
     toast(
       "✅ Jugador colocado",
